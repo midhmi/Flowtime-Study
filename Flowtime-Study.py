@@ -3,6 +3,8 @@ from tkinter import ttk, messagebox
 from datetime import datetime, timedelta
 import json
 import os
+import threading
+import time
 
 # Try importing playsound, but provide a fallback if not installed/fails
 try:
@@ -23,8 +25,9 @@ class TimeTrackerApp:
         self.data_file = "flowtime_data.json"
         self.is_working = False
         self.is_breaking = False
+        self.alarm_active = False  # NEW: Tracks if alarm is currently ringing
         self.start_timestamp = None
-        self.timer_id = None # To control the .after() loop
+        self.timer_id = None 
 
         # --- Load Data ---
         self.load_records()
@@ -65,7 +68,6 @@ class TimeTrackerApp:
         columns = ("Task", "Start", "End", "Duration", "Break")
         self.tree = ttk.Treeview(tree_frame, columns=columns, show="headings")
         
-        # Define Headings and Column widths
         for col in columns:
             self.tree.heading(col, text=col)
             self.tree.column(col, width=100 if col != "Task" else 200)
@@ -100,10 +102,9 @@ class TimeTrackerApp:
             self.is_working = True
             self.start_timestamp = datetime.now()
             
-            # Update UI
             self.action_btn.config(text="Stop & Break", bg="#f44336") # Red color
             self.task_name_entry.config(state="disabled")
-            self.update_timer_display() # Start the loop
+            self.update_timer_display()
 
         else:
             # STOP WORKING
@@ -111,13 +112,12 @@ class TimeTrackerApp:
             end_time = datetime.now()
             duration_seconds = int((end_time - self.start_timestamp).total_seconds())
             
-            # Save record
             new_record = {
                 "task_name": self.task_name_entry.get().strip(),
                 "start_time": self.start_timestamp,
                 "end_time": end_time,
                 "work_time_str": self.format_seconds(duration_seconds),
-                "break_time_str": "0:00" # Placeholder
+                "break_time_str": "0:00"
             }
             self.records.append(new_record)
             
@@ -126,26 +126,18 @@ class TimeTrackerApp:
             self.task_name_entry.config(state="normal")
             self.update_table()
             
-            # Cancel any running timer loops
             if self.timer_id:
                 self.root.after_cancel(self.timer_id)
             
-            # Start Break Flow
             self.prompt_break()
 
     def update_timer_display(self):
-        """Updates the big timer label every second."""
         if self.is_working:
             elapsed = datetime.now() - self.start_timestamp
             self.timer_label.config(text=str(elapsed).split('.')[0], fg="green")
-            # Schedule next update in 1000ms (1 second)
             self.timer_id = self.root.after(1000, self.update_timer_display)
-        elif self.is_breaking:
-             # Logic handled in break timer, but could be unified here
-             pass
 
     def prompt_break(self):
-        """Ask for break duration."""
         def set_break():
             try:
                 minutes = int(entry.get())
@@ -166,21 +158,21 @@ class TimeTrackerApp:
     def start_break_timer(self, minutes):
         self.is_breaking = True
         self.break_seconds_left = minutes * 60
-        self.break_total_duration = self.break_seconds_left
-        
-        # Update last record with planned break time
         self.records[-1]['break_time_str'] = f"{minutes}:00"
         self.update_table()
 
         # Launch Break Window
         self.break_win = tk.Toplevel(self.root)
         self.break_win.title("On Break")
-        self.break_win.geometry("300x150")
+        self.break_win.geometry("300x200")
+        # Handle 'X' button on break window
+        self.break_win.protocol("WM_DELETE_WINDOW", self.end_break_early)
         
         self.lbl_break = tk.Label(self.break_win, text="00:00", font=("Arial", 30))
         self.lbl_break.pack(expand=True)
         
-        tk.Button(self.break_win, text="Skip Break", command=self.end_break_early).pack(pady=10)
+        self.btn_end_break = tk.Button(self.break_win, text="End Break", command=self.end_break_early, bg="#f44336", fg="white")
+        self.btn_end_break.pack(pady=20)
         
         self.run_break_countdown()
 
@@ -188,48 +180,69 @@ class TimeTrackerApp:
         if self.break_seconds_left > 0 and self.is_breaking:
             mins, secs = divmod(self.break_seconds_left, 60)
             self.lbl_break.config(text=f"{mins:02}:{secs:02}")
-            self.timer_label.config(text=f"Break: {mins:02}:{secs:02}", fg="blue") # Update main UI too
+            self.timer_label.config(text=f"Break: {mins:02}:{secs:02}", fg="blue")
             
             self.break_seconds_left -= 1
             self.timer_id = self.root.after(1000, self.run_break_countdown)
-        elif self.break_seconds_left <= 0:
-            self.end_break()
+        elif self.break_seconds_left <= 0 and self.is_breaking:
+            # Time is up! Trigger the alarm loop
+            self.trigger_alarm()
 
-    def end_break(self):
+    def trigger_alarm(self):
+        """Called when break timer hits 0. Starts the sound loop."""
         self.is_breaking = False
+        self.alarm_active = True
+        
+        # Update UI to show Time is Up
+        if hasattr(self, 'break_win') and self.break_win.winfo_exists():
+            self.lbl_break.config(text="TIME UP!", fg="red")
+            self.btn_end_break.config(text="STOP ALARM", bg="red")
+            # Bring window to front
+            self.break_win.lift()
+            self.break_win.attributes('-topmost',True)
+            self.break_win.after_idle(self.break_win.attributes,'-topmost',False)
+
+        self.timer_label.config(text="00:00:00", fg="red")
+
+        # Start the sound loop in a background thread
+        threading.Thread(target=self.loop_sound, daemon=True).start()
+
+    def loop_sound(self):
+        """Runs in a separate thread. Loops until alarm_active is False."""
+        while self.alarm_active:
+            if SOUND_AVAILABLE and os.path.exists("notification.mp3"):
+                try:
+                    # block=True is crucial here so it waits for sound to finish before looping
+                    playsound("notification.mp3", block=True)
+                except:
+                    self.system_beep()
+                    time.sleep(1) # Gap between beeps
+            else:
+                self.system_beep()
+                time.sleep(1) 
+
+    def end_break_early(self):
+        """Stops the break and the alarm."""
+        self.is_breaking = False
+        self.alarm_active = False  # This kills the loop_sound thread
+        
+        if self.timer_id:
+            self.root.after_cancel(self.timer_id)
+            
         if hasattr(self, 'break_win') and self.break_win.winfo_exists():
             self.break_win.destroy()
         
         self.timer_label.config(text="00:00:00", fg="#333")
-        self.play_sound()
-        messagebox.showinfo("Ready?", "Break is over. Back to work!")
-
-    def end_break_early(self):
-        self.is_breaking = False
-        if self.timer_id:
-            self.root.after_cancel(self.timer_id)
-        self.break_win.destroy()
-        self.timer_label.config(text="00:00:00", fg="#333")
+        messagebox.showinfo("Focus", "Break ended. Ready for next task?")
 
     # --- Helpers & Utilities ---
-
-    def play_sound(self):
-        """Robust sound player"""
-        if SOUND_AVAILABLE and os.path.exists("notification.mp3"):
-            try:
-                # block=False is important so UI doesn't freeze
-                playsound("notification.mp3", block=False)
-            except:
-                self.system_beep()
-        else:
-            self.system_beep()
             
     def system_beep(self):
         try:
             import winsound
-            winsound.Beep(1000, 500) # Frequency, Duration
+            winsound.Beep(1000, 500) 
         except:
-            print("\a") # Unix beep
+            print("\a") 
 
     def format_seconds(self, seconds):
         return str(timedelta(seconds=seconds))
@@ -237,8 +250,7 @@ class TimeTrackerApp:
     def update_table(self):
         for item in self.tree.get_children():
             self.tree.delete(item)
-        
-        for r in reversed(self.records): # Show newest first
+        for r in reversed(self.records): 
             self.tree.insert("", "end", values=(
                 r['task_name'],
                 r['start_time'].strftime("%H:%M") if r['start_time'] else "-",
@@ -263,7 +275,6 @@ class TimeTrackerApp:
                 h, m, s = map(int, r['work_time_str'].split(':'))
                 total_sec += h*3600 + m*60 + s
             except: pass
-        
         msg = f"Total Work Time: {str(timedelta(seconds=total_sec))}"
         messagebox.showinfo("Statistics", msg)
 
@@ -272,16 +283,13 @@ class TimeTrackerApp:
             self.records = []
             self.update_table()
 
-    # --- Persistence ---
     def save_records(self):
         serializable = []
         for r in self.records:
             item = r.copy()
-            # Convert datetime to string for JSON
             if item['start_time']: item['start_time'] = item['start_time'].strftime("%Y-%m-%d %H:%M:%S")
             if item['end_time']: item['end_time'] = item['end_time'].strftime("%Y-%m-%d %H:%M:%S")
             serializable.append(item)
-            
         with open(self.data_file, "w") as f:
             json.dump(serializable, f, indent=4)
 
@@ -291,7 +299,6 @@ class TimeTrackerApp:
             with open(self.data_file, "r") as f:
                 data = json.load(f)
                 for r in data:
-                    # Convert string back to datetime
                     if r['start_time']: r['start_time'] = datetime.strptime(r['start_time'], "%Y-%m-%d %H:%M:%S")
                     if r['end_time']: r['end_time'] = datetime.strptime(r['end_time'], "%Y-%m-%d %H:%M:%S")
                     self.records.append(r)
@@ -299,11 +306,10 @@ class TimeTrackerApp:
             print(f"Error loading data: {e}")
 
     def edit_record(self):
-        # Kept this simple - functionality remains similar to your original
-        # but integrated into the new class structure
         pass 
 
     def on_close(self):
+        self.alarm_active = False # Kill alarm thread if app closes
         self.save_records()
         self.root.destroy()
 
