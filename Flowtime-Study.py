@@ -93,7 +93,23 @@ class TimeTrackerApp:
 
     def toggle_work(self):
         if not self.is_working:
-            # START WORKING
+            # --- START WORKING (Logic Changed) ---
+            
+            # 1. Update the PREVIOUS record's break time (if it exists)
+            # This calculates: "New Focus Start Time - Start of Break (Previous End Time)"
+            if self.records:
+                last_record = self.records[-1]
+                if last_record['end_time']: # Ensure there is a valid end time
+                    start_of_new_focus = datetime.now()
+                    end_of_last_task = last_record['end_time']
+                    
+                    # Calculate actual gap
+                    actual_break_delta = start_of_new_focus - end_of_last_task
+                    
+                    # Format as H:MM:SS (remove microseconds)
+                    last_record['break_time_str'] = str(actual_break_delta).split('.')[0]
+            
+            # 2. Standard Start Logic
             task_name = self.task_name_entry.get().strip()
             if not task_name:
                 messagebox.showwarning("Missing Input", "Please enter a task name first.")
@@ -102,12 +118,13 @@ class TimeTrackerApp:
             self.is_working = True
             self.start_timestamp = datetime.now()
             
-            self.action_btn.config(text="Stop & Break", bg="#f44336") # Red color
+            self.action_btn.config(text="Stop & Break", bg="#f44336") 
             self.task_name_entry.config(state="disabled")
             self.update_timer_display()
+            self.update_table() # Refresh table to show the updated break time for previous task
 
         else:
-            # STOP WORKING
+            # --- STOP WORKING (Logic Changed) ---
             self.is_working = False
             end_time = datetime.now()
             duration_seconds = int((end_time - self.start_timestamp).total_seconds())
@@ -117,7 +134,8 @@ class TimeTrackerApp:
                 "start_time": self.start_timestamp,
                 "end_time": end_time,
                 "work_time_str": self.format_seconds(duration_seconds),
-                "break_time_str": "0:00"
+                # Set placeholder text until the NEXT task starts
+                "break_time_str": "On Break..." 
             }
             self.records.append(new_record)
             
@@ -158,14 +176,15 @@ class TimeTrackerApp:
     def start_break_timer(self, minutes):
         self.is_breaking = True
         self.break_seconds_left = minutes * 60
-        self.records[-1]['break_time_str'] = f"{minutes}:00"
-        self.update_table()
+        
+        # REMOVED: self.records[-1]['break_time_str'] = ... 
+        # We don't touch the table here anymore. 
+        # The table will keep saying "On Break..." until you start your next task.
 
         # Launch Break Window
         self.break_win = tk.Toplevel(self.root)
         self.break_win.title("On Break")
         self.break_win.geometry("300x200")
-        # Handle 'X' button on break window
         self.break_win.protocol("WM_DELETE_WINDOW", self.end_break_early)
         
         self.lbl_break = tk.Label(self.break_win, text="00:00", font=("Arial", 30))
